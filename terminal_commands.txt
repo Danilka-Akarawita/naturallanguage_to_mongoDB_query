@@ -1,0 +1,8 @@
+# Topic: Execute Mongo Query Compiler
+python mongo_query_compiler.py --mongo_uri "mongodb+srv://danilka:4uPwMFlKFheJws5Q@cluster0.nq9yl1i.mongodb.net/?appName=Cluster0" --mongo_db "cakeflow_proto" --neo4j_uri "neo4j+ssc://d7382db4.databases.neo4j.io" --neo4j_user "neo4j" --neo4j_password "NgaSJ7I8kdB5nTurvgjS66tBqA3cO-yO658heoNKVsQ" --intent_file intent.json --execute
+
+# Topic: Load Neo4j Metadata
+python neo4j_metadata_loader.py --uri neo4j+ssc://d7382db4.databases.neo4j.io --user neo4j --password NgaSJ7I8kdB5nTurvgjS66tBqA3cO-yO658heoNKVsQ --reset
+
+# Topic: Generate Search Intent
+python intent_generator.py --q "Show oldest pending orders from Colombo in last month"

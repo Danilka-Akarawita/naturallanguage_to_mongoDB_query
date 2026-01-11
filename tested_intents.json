@@ -1,0 +1,169 @@
+{
+    "scenarios": {
+        "1_schema_fix_deliveries": {
+            "description": "Simple join with corrected alias logic",
+            "intent": {
+                "root": "deliveries",
+                "select": [
+                    "_id",
+                    "orderId",
+                    "assignedToUserId",
+                    "deliveryStatus",
+                    "address",
+                    "pinCode",
+                    "deliveredAt"
+                ],
+                "filters": [
+                    {
+                        "pathHint": "assignedToUserId.name",
+                        "op": "eq",
+                        "value": "Ruwan"
+                    },
+                    {
+                        "pathHint": "deliveryStatus",
+                        "op": "eq",
+                        "value": "DELIVERED"
+                    }
+                ],
+                "sort": [],
+                "limit": 100
+            }
+        },
+        "2_complex_orders_embedded": {
+            "description": "Multiple joins + Embedded Array Join (items.product) + Operators",
+            "intent": {
+                "root": "orders",
+                "select": [
+                    "_id",
+                    "orderNo",
+                    "status",
+                    "createdAt",
+                    "customer.name",
+                    "outlet.name",
+                    "items.product.name",
+                    "items.qty"
+                ],
+                "filters": [
+                    {
+                        "pathHint": "outlet.city",
+                        "op": "eq",
+                        "value": "Colombo"
+                    },
+                    {
+                        "pathHint": "customer.tags",
+                        "op": "eq",
+                        "value": "VIP"
+                    },
+                    {
+                        "pathHint": "items.product.category",
+                        "op": "eq",
+                        "value": "CAKE"
+                    },
+                    {
+                        "pathHint": "status",
+                        "op": "neq",
+                        "value": "CANCELLED"
+                    }
+                ],
+                "sort": [
+                    {
+                        "field": "createdAt",
+                        "order": "desc"
+                    }
+                ],
+                "limit": 50
+            }
+        },
+        "3_complex_payments": {
+            "description": "Standard multiple joins across different root",
+            "intent": {
+                "root": "payments",
+                "select": [
+                    "_id",
+                    "amount",
+                    "method",
+                    "payer.name",
+                    "order.orderNo",
+                    "order.status"
+                ],
+                "filters": [
+                    {
+                        "pathHint": "amount",
+                        "op": "gt",
+                        "value": 5000
+                    },
+                    {
+                        "pathHint": "method",
+                        "op": "eq",
+                        "value": "CARD"
+                    },
+                    {
+                        "pathHint": "payer.tags",
+                        "op": "eq",
+                        "value": "VIP"
+                    },
+                    {
+                        "pathHint": "order.status",
+                        "op": "eq",
+                        "value": "PENDING"
+                    }
+                ],
+                "sort": [],
+                "limit": 10
+            }
+        },
+        "4_inventory_moves_embedded_object": {
+            "description": "Embedded Object Join (ref.order)",
+            "intent": {
+                "root": "inventory_moves",
+                "select": [
+                    "_id",
+                    "type",
+                    "qty",
+                    "product.name",
+                    "ref.order.orderNo"
+                ],
+                "filters": [
+                    {
+                        "pathHint": "type",
+                        "op": "eq",
+                        "value": "OUT"
+                    },
+                    {
+                        "pathHint": "product.category",
+                        "op": "eq",
+                        "value": "CAKE"
+                    },
+                    {
+                        "pathHint": "ref.order.status",
+                        "op": "eq",
+                        "value": "PENDING"
+                    }
+                ],
+                "sort": [],
+                "limit": 10
+            }
+        },
+        "5_chained_transitive_join": {
+            "description": "Transitive/Recursive Join (Deliveries -> Orders -> Customers)",
+            "intent": {
+                "root": "deliveries",
+                "select": [
+                    "_id",
+                    "deliveryStatus",
+                    "order.orderNo",
+                    "order.customer.name"
+                ],
+                "filters": [
+                    {
+                        "pathHint": "order.customer.name",
+                        "op": "eq",
+                        "value": "Nimal"
+                    }
+                ],
+                "sort": [],
+                "limit": 10
+            }
+        }
+    }
+}

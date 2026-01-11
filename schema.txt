@@ -1,0 +1,172 @@
+# MongoDB Schema Documentation
+
+## Collections Overview
+
+### users
+Stores employees/staff members who operate the system.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| name | String | Full name of the user/employee |
+| role | String | Job role (e.g., "admin", "cashier", "delivery_driver") |
+| outletId | ObjectId | Reference to the outlet where user works |
+| orgId | ObjectId | Reference to the organization |
+
+### customers
+Stores customer information for order tracking and CRM.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| name | String | Customer's full name |
+| phone | String | Contact phone number |
+| tags | Array[String] | Labels for customer segmentation (e.g., ["vip", "wholesale"]) |
+| orgId | ObjectId | Reference to the organization |
+
+### outlets
+Physical store locations or branches.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| name | String | Outlet/branch name (e.g., "Main Branch", "City Mall Store") |
+| city | String | City where outlet is located (e.g., "Colombo", "Kandy") |
+| orgId | ObjectId | Reference to the organization |
+
+### products
+Catalog of items available for sale.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| sku | String | Stock keeping unit code |
+| name | String | Product name (e.g., "Chocolate Cake", "Birthday Cake") |
+| category | String | Product category (e.g., "cakes", "pastries", "beverages") |
+| price | Number | Unit price in local currency |
+| active | Boolean | Whether product is currently available |
+| orgId | ObjectId | Reference to the organization |
+
+### orders
+Customer orders placed through the system.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| orderNo | String | Human-readable order number (e.g., "ORD-2024-001") |
+| customerId | ObjectId | Reference to the customer who placed the order |
+| outletId | ObjectId | Reference to the outlet handling the order |
+| createdByUserId | ObjectId | Reference to the staff member who created the order |
+| status | String | Current order status |
+| createdAt | Date | Timestamp when order was created |
+| needDelivery | Boolean | Whether order requires delivery |
+| items | Array | List of products in the order |
+| customization | Object | Special instructions or customizations |
+| orgId | ObjectId | Reference to the organization |
+
+#### orders.items[] (embedded array)
+| Field | Type | Description |
+|-------|------|-------------|
+| productId | ObjectId | Reference to the product |
+| qty | Number | Quantity ordered |
+| unitPrice | Number | Price per unit at time of order |
+
+### payments
+Payment transactions for orders.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| orderId | ObjectId | Reference to the associated order |
+| paidByCustomerId | ObjectId | Reference to the customer who paid |
+| method | String | Payment method (e.g., "cash", "card", "online") |
+| amount | Number | Payment amount |
+| paidAt | Date | Timestamp of payment |
+| status | String | Payment status |
+| orgId | ObjectId | Reference to the organization |
+
+### deliveries
+Delivery assignments and tracking.
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| orderId | ObjectId | Reference to the order being delivered |
+| assignedToUserId | ObjectId | Reference to the delivery driver |
+| deliveryStatus | String | Current delivery status |
+| address | String | Delivery address |
+| pinCode | String | Postal/PIN code |
+| deliveredAt | Date | Timestamp when delivered (null if not yet delivered) |
+| orgId | ObjectId | Reference to the organization |
+
+### inventory_moves
+Tracks inventory changes (stock in/out movements).
+| Field | Type | Description |
+|-------|------|-------------|
+| _id | ObjectId | Unique identifier |
+| productId | ObjectId | Reference to the product |
+| outletId | ObjectId | Reference to the outlet |
+| type | String | Type of inventory movement |
+| qty | Number | Quantity moved (positive for IN, can be positive for OUT/WASTAGE) |
+| ref | Object | Reference to related order or delivery |
+| createdAt | Date | Timestamp of the movement |
+| orgId | ObjectId | Reference to the organization |
+
+---
+
+## Relationships (for lookups/joins)
+- orders.customerId -> customers._id
+- orders.outletId -> outlets._id
+- orders.createdByUserId -> users._id
+- orders.items[].productId -> products._id
+- payments.orderId -> orders._id
+- payments.paidByCustomerId -> customers._id
+- deliveries.orderId -> orders._id
+- deliveries.assignedToUserId -> users._id
+- inventory_moves.productId -> products._id
+- inventory_moves.outletId -> outlets._id
+
+---
+
+## Language Mappings
+| User says | Maps to collection |
+|-----------|-------------------|
+| "order", "orders" | orders |
+| "customer", "customers", "buyer" | customers |
+| "outlet", "branch", "store", "shop" | outlets |
+| "product", "item", "goods" | products |
+| "payment", "transaction" | payments |
+| "delivery", "shipment" | deliveries |
+| "stock", "inventory" | inventory_moves |
+| "driver", "courier" | deliveries.assignedToUserId |
+| "buyer", "shopper" | orders.customer |
+| "creator", "staff" | orders.createdByUserId |
+
+---
+
+## Enum Values
+
+### orders.status
+| Value | Description |
+|-------|-------------|
+| PENDING | Order placed, awaiting processing |
+| IN_PRODUCTION | Order is being prepared |
+| READY | Order is ready for pickup/delivery |
+| DELIVERED | Order has been delivered |
+| CANCELLED | Order was cancelled |
+
+### payments.status
+| Value | Description |
+|-------|-------------|
+| SUCCESS | Payment completed successfully |
+| FAILED | Payment failed |
+| REFUNDED | Payment was refunded |
+
+### deliveries.deliveryStatus
+| Value | Description |
+|-------|-------------|
+| PENDING | Delivery not yet started |
+| OUT_FOR_DELIVERY | Driver is on the way |
+| DELIVERED | Successfully delivered |
+| FAILED | Delivery attempt failed |
+
+### inventory_moves.type
+| Value | Description |
+|-------|-------------|
+| IN | Stock received/added |
+| OUT | Stock sold/removed |
+| WASTAGE | Stock lost/expired |
+| TRANSFER | Stock moved between outlets |

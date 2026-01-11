@@ -1,0 +1,18 @@
+{
+  "root": "deliveries",
+  "select": [
+    "_id",
+    "deliveryStatus",
+    "order.orderNo",
+    "order.customer.name"
+  ],
+  "filters": [
+    {
+      "pathHint": "order.customer.name",
+      "op": "eq",
+      "value": "Nimal"
+    }
+  ],
+  "sort": [],
+  "limit": 10
+}

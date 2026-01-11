@@ -1,0 +1,7 @@
+pymongo
+pydantic
+dnspython
+python-dotenv
+pymongo
+neo4j
+
