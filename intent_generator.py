@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Dict, List, Literal, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationError, ConfigDict
 from openai import OpenAI
@@ -62,6 +62,21 @@ class Sort(BaseModel):
     dir: SortDir
 
 
+# Aggregation types
+AggregationType = Literal["count", "group"]
+
+
+class GroupOperation(BaseModel):
+    """A single group operation like sum, avg, count."""
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["count", "sum", "avg", "min", "max"] = Field(..., description="Aggregation operation")
+    field: Optional[str] = Field(None, description="Field to aggregate (not needed for count)")
+
+
+
+
+
 class Intent(BaseModel):
     """
     WHAT the user wants (no DB-specific logic).
@@ -73,6 +88,10 @@ class Intent(BaseModel):
     filters: List[Filter] = Field(...)
     sort: List[Sort] = Field(...)
     limit: int = Field(..., ge=1, le=200, description="Result size limit")
+    aggregation: Optional[Literal["count"]] = Field(
+        None,
+        description="Use 'count' when user asks how many / total number"
+    )
 
 
 # -----------------------------
@@ -122,7 +141,7 @@ Enums:
 SYSTEM_PROMPT = """You convert user requests into an Intent JSON object.
 
 Rules:
-- -When user asks for human-readable names of roles, map foreign key fields to their aliases in the schema.
+- When user asks for human-readable names of roles, map foreign key fields to their aliases in the schema.
 - Output MUST match the provided JSON schema (no extra keys).
 - root must be one of the known collections.
 - select includes only explicitly requested fields.
@@ -133,7 +152,7 @@ Rules:
 - Never use fields ending with "Id" unless the user explicitly provides an ID.
 - When the user refers to an entity by name, city, or label,
   use dotted paths like outlet.name or outlet.city.
-  - select MUST include only fields explicitly requested by the user.
+- select MUST include only fields explicitly requested by the user.
 - If the user does not ask for fields, select MUST be ["orderNo"].
 - Location phrases like "from Colombo" always refer to outlet.city unless explicitly stated otherwise.
 - Do not invent delivery.address subfields.
@@ -141,6 +160,12 @@ Rules:
 - If a month is mentioned without a year, assume the most recent past month relative to today.
 - Use "deliveries.*" for delivery-related fields (never "delivery.*").
 
+Aggregation Rules:
+- When user asks "how many", "count", "total number of", "number of" → use aggregation with type="count"
+- For count queries, select should be empty [] since we only return the count.
+- When user asks "total/sum of X", "average X", "group by" → use aggregation with type="group"
+- For group queries, specify 'by' field and 'operations' with named results.
+- If no aggregation is needed (user wants actual records), leave aggregation as null.
 
 
 """
@@ -151,6 +176,8 @@ def build_response_format_json_schema() -> Dict[str, Any]:
     Build OpenAI Structured Outputs schema wrapper.
     """
     schema = Intent.model_json_schema()
+    props = schema.get("properties", {})
+    schema["required"] = list(props.keys())
 
     return {
         "type": "json_schema",

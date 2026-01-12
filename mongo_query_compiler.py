@@ -83,12 +83,14 @@ def extract_potential_paths(intent: Dict[str, Any]) -> Set[str]:
                  # filters use 'pathHint', sort uses 'field'
                 path = item.get("pathHint") or item.get("field")
             parts = path.split(".")
+            print("parts", parts)
             if len(parts) >= 1:
                 used_paths.add(parts[0])
             if len(parts) >= 2:
                 used_paths.add(f"{parts[0]}.{parts[1]}")
 
     logger.debug("Extracted potential paths: %s", used_paths)
+    print("used_paths", used_paths)
     return used_paths
 
 # ------------------------------------------------------------------
@@ -136,6 +138,7 @@ def fetch_join_recipes(
         
         for path in sorted_paths:
             segments = path.split(".")
+            print("segments", segments)
             # We try to validate if this path (or a prefix of it) represents a chain of joins
             # Optimization: only check if it looks like a chain (not ending in scalar field).
             # But we don't know which is scalar. So we check all. 
@@ -143,13 +146,17 @@ def fetch_join_recipes(
             # Neo4j check
             try:
                 result = session.run(CY_VERIFY_CHAIN, root=root_collection, segments=segments)
+                print("result", result)
                 record = result.single()
+                print("record", record)
                 
                 if record:
                     # It's a valid chain!
                     # Construct recipes for each step in the chain
                     colls = record["collections"] # [Root, Step1, Step2...]
                     rels = record["rels"]         # [Rel1, Rel2...]
+                    print("colls", colls," rels", rels,"record", record)
+                    
                     
                     current_path_prefix = ""
                     
@@ -157,16 +164,20 @@ def fetch_join_recipes(
                         # src is colls[i], dst is colls[i+1]
                         # alias is rel['alias']
                         alias = rel['alias']
+                        print("i", i,"rel", rel,"alias", alias)
                         
                         # Target path accumulates: "order", then "order.customer"
                         if i == 0:
                             target_path = alias
                             lookup_local = rel['localField'] # e.g. orderId
+                            print("0 target_path", target_path,"lookup_local", lookup_local)
                         else:
                             target_path = f"{current_path_prefix}.{alias}"
                             lookup_local = f"{current_path_prefix}.{rel['localField']}"
+                            print("else target_path", target_path,"lookup_local", lookup_local)
                         
                         if target_path not in recipes_map:
+                            print("target_path not in recipes_map")
                             # Create recipe
                             recipe = JoinRecipe(
                                 kind="collection", # Simplified: assuming REFERS_TO is collection join
@@ -408,7 +419,38 @@ def compile_pipeline(intent: Dict[str, Any], join_recipes: List[JoinRecipe]) -> 
         pipeline.append({"$match": compile_match(post_lookup_filters, join_recipes)})
         logger.debug("Added post-lookup filters")
 
-    # 4. Final Projection (Optional but good practice, implicit in how aggregation works)
+    # 4. Aggregation Operations (count, group, etc.)
+    aggregation = intent.get("aggregation")
+    if aggregation:
+        if aggregation == "count":
+            # Simple count of matching documents
+            pipeline.append({"$count": "total"})
+            logger.debug("Added $count stage")
+        elif isinstance(aggregation, dict):
+            # Support for more complex aggregations
+            agg_type = aggregation.get("type")
+            if agg_type == "count":
+                count_field = aggregation.get("as", "total")
+                pipeline.append({"$count": count_field})
+                logger.debug("Added $count stage as '%s'", count_field)
+            elif agg_type == "group":
+                # Group by support
+                group_by = aggregation.get("by")
+                group_ops = aggregation.get("operations", {})
+                group_stage = {"_id": f"${group_by}" if group_by else None}
+                
+                for op_name, op_config in group_ops.items():
+                    if op_config.get("op") == "count":
+                        group_stage[op_name] = {"$sum": 1}
+                    elif op_config.get("op") == "sum":
+                        group_stage[op_name] = {"$sum": f"${op_config.get('field', '')}"}
+                    elif op_config.get("op") == "avg":
+                        group_stage[op_name] = {"$avg": f"${op_config.get('field', '')}"}
+                
+                pipeline.append({"$group": group_stage})
+                logger.debug("Added $group stage: %s", group_stage)
+
+    # 5. Final Projection (Optional but good practice, implicit in how aggregation works)
     # We won't add an explicit $project unless 'select' requires complex reshaping,
     # but for now we leave it as is to return full documents + joins.
 
