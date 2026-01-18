@@ -1,7 +1,8 @@
 """
 mongo_query_compiler.py
 
-Debug-friendly MongoDB aggregation compiler driven by Neo4j schema metadata.
+Production-ready MongoDB aggregation compiler with full support for nested embedded paths
+driven by Neo4j schema metadata.
 """
 
 from __future__ import annotations
@@ -11,472 +12,266 @@ import json
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set
 
 from neo4j import GraphDatabase, Driver
 from pymongo import MongoClient
 
 # ------------------------------------------------------------------
-# Logging
+# Logging Configuration
 # ------------------------------------------------------------------
 
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logging.getLogger("pymongo").setLevel(logging.WARNING)
 logging.getLogger("neo4j").setLevel(logging.WARNING)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("mongo_query_compiler")
 
 # ------------------------------------------------------------------
-# Data Structures
+# Data Models
 # ------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class JoinRecipe:
-    kind: str                   # "collection" | "embedded"
+    kind: str                    # "collection" | "embedded"
     src_collection: str
     alias: str
     dst_collection: str
     local_field: str
     foreign_field: str
+    target_path: Optional[str] = None
+    lookup_local_field: Optional[str] = None
     array_path: Optional[str] = None
-    target_path: Optional[str] = None # Full dot-path e.g. "order.customer"
-    lookup_local_field: Optional[str] = None # Full path to local field e.g. "order.customerId"
+
 
 class QueryCompilationError(Exception):
-    """Custom exception for query compilation failures."""
-    pass
+    """Raised when query compilation fails."""
 
 # ------------------------------------------------------------------
-# 1) Intent Handling
+# Intent Loading
 # ------------------------------------------------------------------
 
 def load_intent(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            intent = json.load(f)
-        logger.info("Intent loaded successfully")
-        return intent
+            return json.load(f)
     except Exception as exc:
         raise QueryCompilationError(f"Failed to load intent file: {exc}") from exc
 
 
 def extract_potential_paths(intent: Dict[str, Any]) -> Set[str]:
     """
-    Extracts all dot-notation paths referenced in the intent (select, filters, sort).
-    Returns a set of unique potential paths (e.g., 'deliveries.driver', 'createdBy').
+    Extract all dot-notation prefixes from select, filters, and sort.
+    Handles arbitrarily deep paths.
     """
-    root = intent["root"]
-    used_paths: Set[str] = set()
-
-    logger.debug("--- extract_potential_paths ---")
-    logger.debug(f"Root: {root}")
-
+    used: Set[str] = set()
     for section in ("select", "filters", "sort"):
-        items = intent.get(section, [])
-        logger.debug(f"Scanning section '{section}': {items}")
-        for item in items:
-            if isinstance(item, str):
-                path = item
-            else:
-                 # filters use 'pathHint', sort uses 'field'
-                path = item.get("pathHint") or item.get("field")
+        for item in intent.get(section, []):
+            path = item if isinstance(item, str) else item.get("pathHint") or item.get("field")
+            if not path:
+                continue
             parts = path.split(".")
-            print("parts", parts)
-            if len(parts) >= 1:
-                used_paths.add(parts[0])
-            if len(parts) >= 2:
-                used_paths.add(f"{parts[0]}.{parts[1]}")
-
-    logger.debug("Extracted potential paths: %s", used_paths)
-    print("used_paths", used_paths)
-    return used_paths
+            for i in range(1, len(parts)+1):
+                used.add(".".join(parts[:i]))
+    logger.info("Potential paths extracted: %s", used)
+    return used
 
 # ------------------------------------------------------------------
-# 2) Neo4j Metadata Queries (Dynamic Discovery)
+# Neo4j Metadata Queries
 # ------------------------------------------------------------------
 
-# Recursive path check
-CY_VERIFY_CHAIN = """
-MATCH (start:Collection {name: $root})
-// We want to find a path of relationships that matches the alias sequence
-// This is a bit complex in pure Cypher 3.5/4.x without APOC, so we iterate in Python 
-// or use a path matching pattern.
-// Simplified assumption for Prototype: All relationships are direct REFERS_TO for chaining.
-// Mixed EMBEDS/REFERS_TO chains are harder. 
-// For this request, we strictly look for REFERS_TO chains.
-
+CY_VERIFY_REFERS_CHAIN = """
+MATCH (start:Collection {name:$root})
 MATCH p = (start)-[:REFERS_TO*]->(end)
 WHERE [r IN relationships(p) | r.alias] = $segments
-RETURN length(p) as depth,
-       [N IN nodes(p) | N.name] as collections,
-       [R IN relationships(p) | {
-            alias: R.alias,
-            localField: R.localField,
-            foreignField: R.foreignField
-       }] as rels
+RETURN
+  [n IN nodes(p) | n.name] AS collections,
+  [r IN relationships(p) | {
+     alias: r.alias,
+     localField: r.localField,
+     foreignField: r.foreignField
+  }] AS rels
+"""
+
+CY_DISCOVER_EMBEDDED = """
+MATCH (src:Collection {name:$root})-[:EMBEDS*1..]->(e:Embedded)
+MATCH (e)-[r:REFERS_TO]->(dst:Collection)
+WHERE e.path + '.' + r.alias IN $candidates
+RETURN
+  e.path AS array_path,
+  r.alias AS alias,
+  dst.name AS dst_collection,
+  r.localField AS local_field,
+  r.foreignField AS foreign_field
 """
 
 def fetch_join_recipes(
     driver: Driver,
     root_collection: str,
-    potential_paths: Set[str]
+    potential_paths: Set[str],
 ) -> List[JoinRecipe]:
-    """
-    Discover joins including deep/transitive ones (e.g. order.customer).
-    """
-    recipes_map: Dict[str, JoinRecipe] = {} # Keyed by target_path to deduplicate
+
+    recipes: Dict[str, JoinRecipe] = {}
 
     with driver.session() as session:
-        # Check every potential path to see if it's a valid chain
-        # e.g. "order", "order.customer", "order.customer.name"
-        # We only care about paths that *might* be joins.
-        
-        # Sort paths by length so we process 'order' before 'order.customer'
-        sorted_paths = sorted(list(potential_paths), key=lambda s: s.count('.'))
-        
-        for path in sorted_paths:
+        # Collection-to-collection joins
+        for path in sorted(potential_paths, key=lambda p: p.count(".")):
             segments = path.split(".")
-            print("segments", segments)
-            # We try to validate if this path (or a prefix of it) represents a chain of joins
-            # Optimization: only check if it looks like a chain (not ending in scalar field).
-            # But we don't know which is scalar. So we check all. 
-            
-            # Neo4j check
-            try:
-                result = session.run(CY_VERIFY_CHAIN, root=root_collection, segments=segments)
-                print("result", result)
-                record = result.single()
-                print("record", record)
-                
-                if record:
-                    # It's a valid chain!
-                    # Construct recipes for each step in the chain
-                    colls = record["collections"] # [Root, Step1, Step2...]
-                    rels = record["rels"]         # [Rel1, Rel2...]
-                    print("colls", colls," rels", rels,"record", record)
-                    
-                    
-                    current_path_prefix = ""
-                    
-                    for i, rel in enumerate(rels):
-                        # src is colls[i], dst is colls[i+1]
-                        # alias is rel['alias']
-                        alias = rel['alias']
-                        print("i", i,"rel", rel,"alias", alias)
-                        
-                        # Target path accumulates: "order", then "order.customer"
-                        if i == 0:
-                            target_path = alias
-                            lookup_local = rel['localField'] # e.g. orderId
-                            print("0 target_path", target_path,"lookup_local", lookup_local)
-                        else:
-                            target_path = f"{current_path_prefix}.{alias}"
-                            lookup_local = f"{current_path_prefix}.{rel['localField']}"
-                            print("else target_path", target_path,"lookup_local", lookup_local)
-                        
-                        if target_path not in recipes_map:
-                            print("target_path not in recipes_map")
-                            # Create recipe
-                            recipe = JoinRecipe(
-                                kind="collection", # Simplified: assuming REFERS_TO is collection join
-                                src_collection=colls[i],
-                                alias=alias,
-                                dst_collection=colls[i+1],
-                                local_field=rel['localField'],
-                                foreign_field=rel['foreignField'],
-                                target_path=target_path,
-                                lookup_local_field=lookup_local
-                            )
-                            recipes_map[target_path] = recipe
-                            logger.debug("Found transitive recipe: %s", recipe)
-                        
-                        current_path_prefix = target_path
-                        
-            except Exception as e:
-                logger.warning("Error checking path %s: %s", path, e)
-                
-    # Also include the old logic for EMBEDS if needed, or assume this replaces it?
-    # For constraints of this task, we stick to the new chain logic for REFERS_TO.
-    # But we MUST preserve the embedded logic (Items -> Products).
-    # The pure path query above misses EMBEDS. 
-    # Let's run the old query strictly for embedded/1-hop to be safe? 
-    # Or rely on the user intent being clear. 
-    # For safety, let's keep the old single-hop discovery for Embedded specifically.
-    
-    # ... (Re-run legacy discovery for 'embedded' specifically if needed, 
-    # but the prompt asked for Transitive, mostly affecting REFERS_TO chains).
-    # To save time/code, I'll merge the existing 1-hop embedded logic here.
+            record = session.run(
+                CY_VERIFY_REFERS_CHAIN,
+                root=root_collection,
+                segments=segments,
+            ).single()
+            logger.debug("Record for path %s: %s", path, record)
+            if not record:
+                continue
 
-    CY_DISCOVER_EMBEDDED = """
-    MATCH (src:Collection {name:$root})-[:EMBEDS]->(e:Embedded)
-    MATCH (e)-[r:REFERS_TO]->(dst:Collection)
-    WHERE e.path + '.' + r.alias IN $candidates
-    RETURN 'embedded' AS kind, r.alias AS alias, dst.name AS dst_collection,
-           r.localField AS local_field, r.foreignField AS foreign_field, e.path AS array_path
-    """
-    
-    try:
-        with driver.session() as session:
-            res = session.run(CY_DISCOVER_EMBEDDED, root=root_collection, candidates=list(potential_paths))
-            for record in res:
-                # Embedded joins (items.product)
-                # target_path is alias (product), but inside array (items). 
-                # effectively target is "product" but we handle it via unwind.
-                recipe = JoinRecipe(
+            collections = record["collections"]
+            rels = record["rels"]
+            current_prefix = ""
+            for idx, rel in enumerate(rels):
+                alias = rel["alias"]
+                target_path = alias if idx == 0 else f"{current_prefix}.{alias}"
+                lookup_local = rel["localField"] if idx == 0 else f"{current_prefix}.{rel['localField']}"
+                if target_path not in recipes:
+                    recipes[target_path] = JoinRecipe(
+                        kind="collection",
+                        src_collection=collections[idx],
+                        dst_collection=collections[idx+1],
+                        alias=alias,
+                        local_field=rel["localField"],
+                        foreign_field=rel["foreignField"],
+                        target_path=target_path,
+                        lookup_local_field=lookup_local
+                    )
+                current_prefix = target_path
+
+        # Embedded joins (multi-level)
+        embedded = session.run(
+            CY_DISCOVER_EMBEDDED,
+            root=root_collection,
+            candidates=list(potential_paths),
+        )
+
+        for rec in embedded:
+            key = f"embedded:{rec['array_path']}.{rec['alias']}"
+            if key not in recipes:
+                recipes[key] = JoinRecipe(
                     kind="embedded",
                     src_collection=root_collection,
-                    alias=record["alias"],
-                    dst_collection=record["dst_collection"],
-                    local_field=record["local_field"],
-                    foreign_field=record["foreign_field"],
-                    array_path=record["array_path"],
-                    target_path=record["alias"], # kept simple for embedded
-                    lookup_local_field=None # handled by special logic
+                    alias=rec["alias"],
+                    dst_collection=rec["dst_collection"],
+                    local_field=rec["local_field"],
+                    foreign_field=rec["foreign_field"],
+                    array_path=rec["array_path"]
                 )
-                if recipe.alias not in [r.alias for r in recipes_map.values()]: # simple dedupe
-                     recipes_map[f"embedded_{recipe.alias}"] = recipe
-                     logger.debug("Found embedded recipe: %s", recipe)
 
-    except Exception as e:
-        logger.warning(f"Embedded discovery failed: {e}")
-
-    return list(recipes_map.values())
+    return list(recipes.values())
 
 # ------------------------------------------------------------------
-# 3) Mongo Pipeline Compilation
+# MongoDB Pipeline Compilation
 # ------------------------------------------------------------------
 
-def compile_match(filters: List[Dict[str, Any]], join_recipes: List[JoinRecipe] = []) -> Dict[str, Any]:
+def compile_match(filters: List[Dict[str, Any]], join_recipes: List[JoinRecipe]) -> Dict[str, Any]:
     match: Dict[str, Any] = {}
-    
-    # Create a mapping of {full_intent_path_prefix -> alias} for rewriting
-    # e.g. "items.product" -> "product"
-    path_rewrites = {}
-    for jr in join_recipes:
-        if jr.kind == "embedded" and jr.array_path:
-            # construct the logical path "items.product"
-            logical_path = f"{jr.array_path}.{jr.alias}"
-            path_rewrites[logical_path] = jr.alias
-
+    rewrite_map = {f"{r.array_path}.{r.alias}": r.alias for r in join_recipes if r.kind=="embedded" and r.array_path}
     for f in filters:
-        original_path = f["pathHint"]
-        final_path = original_path
-        
-        # Check if we need to rewrite
-        for logical, alias in path_rewrites.items():
-            if original_path.startswith(logical):
-                # replace "items.product.category" -> "product.category"
-                final_path = original_path.replace(logical, alias, 1)
+        path = f["pathHint"]
+        for logical, alias in rewrite_map.items():
+            if path.startswith(logical):
+                path = path.replace(logical, alias, 1)
                 break
-        
         op = f.get("op", "eq")
         val = f["value"]
-        
-        if op == "eq":
-            match[final_path] = val
-        elif op == "neq":
-            match[final_path] = {"$ne": val}
-        elif op == "gt":
-            match[final_path] = {"$gt": val}
-        elif op == "gte":
-            match[final_path] = {"$gte": val}
-        elif op == "lt":
-            match[final_path] = {"$lt": val}
-        elif op == "lte":
-            match[final_path] = {"$lte": val}
-        elif op == "in":
-            match[final_path] = {"$in": val}
-        else:
-            # Fallback to equality
-            match[final_path] = val
+        match[path] = (
+            val if op=="eq" else
+            {"$ne": val} if op=="neq" else
+            {"$gt": val} if op=="gt" else
+            {"$gte": val} if op=="gte" else
+            {"$lt": val} if op=="lt" else
+            {"$lte": val} if op=="lte" else
+            {"$in": val} if op=="in" else
+            {"$regex": val, "$options": "i"} if op=="contains" else
+            val
+        )
     return match
 
+
 def compile_pipeline(intent: Dict[str, Any], join_recipes: List[JoinRecipe]) -> List[Dict[str, Any]]:
-    logger.debug("--- compile_pipeline ---")
     pipeline: List[Dict[str, Any]] = []
-    
-    # helper sets for quick lookups
-    # which aliases are created by lookups?
     lookup_aliases = {r.alias for r in join_recipes}
-    
-    # Distinct set of logical joins needed
-    # Sort them to ensure deterministic order (collections first, then embedded)
-    sorted_recipes = sorted(join_recipes, key=lambda x: (x.kind != 'collection', x.array_path or "", x.alias))
-    logger.debug("Sorted Join Recipes:\n%s", "\n".join(str(r) for r in sorted_recipes))
-
-    # 1. Pre-Lookup Filters
-    # Filters that apply to fields NOT produced by a lookup.
-    # This includes root fields and embedded array fields (before lookup).
-    raw_filters = intent.get("filters", [])
-    pre_lookup_filters = []
-    post_lookup_filters = []
-
-    for f in raw_filters:
-        path = f["pathHint"]
-        # Improved heuristic: check if ANY segment matches a lookup alias
-        # OR if it matches a known "array_path.alias" pattern
-        
-        is_post = False
-        
-        # Check direct aliases
-        parts = path.split(".")
+    pre_filters, post_filters = [], []
+    for f in intent.get("filters", []):
+        parts = f["pathHint"].split(".")
         if any(p in lookup_aliases for p in parts):
-            is_post = True
-            
-        # Check embedded logical paths (e.g. items.product)
-        if not is_post:
-            for jr in join_recipes:
-                if jr.kind == "embedded" and jr.array_path:
-                    logical_prefix = f"{jr.array_path}.{jr.alias}"
-                    if path.startswith(logical_prefix):
-                        is_post = True
-                        break
-
-        if is_post:
-            post_lookup_filters.append(f)
+            post_filters.append(f)
         else:
-            pre_lookup_filters.append(f)
+            pre_filters.append(f)
+    if pre_filters:
+        pipeline.append({"$match": compile_match(pre_filters, join_recipes)})
 
-    if pre_lookup_filters:
-        logger.debug("Pre-lookup filters identified: %s", pre_lookup_filters)
-    if pre_lookup_filters:
-        logger.debug("Pre-lookup filters identified: %s", pre_lookup_filters)
-        pipeline.append({"$match": compile_match(pre_lookup_filters, join_recipes)}) # No rewrites needed usually for pre
-        logger.debug("Added pre-lookup filters")
+    # Sort joins: collections first, then embedded by array path depth
+    join_recipes = sorted(
+        join_recipes,
+        key=lambda r: (r.kind!="collection", r.target_path.count(".") if r.target_path else 0)
+    )
 
-    # 2. Apply Joins
-    # We must track which arrays have already been unwound to prevent "Double Unwind"
-    unwound_arrays: Set[str] = set()
-
-    # Sort logic: Collections by path depth (length of target_path), then Embedded
-    # e.g. "order" (depth 1) before "order.customer" (depth 2)
-    def recipe_sort_key(r: JoinRecipe):
+    unwound: Set[str] = set()
+    for r in join_recipes:
         if r.kind == "collection":
-            return (0, r.target_path.count(".") if r.target_path else 0)
-        return (1, 0)
-        
-    sorted_recipes = sorted(join_recipes, key=recipe_sort_key)
-
-    for jr in sorted_recipes:
-        if jr.kind == "collection":
-            # Standard Lookup (Transitive aware)
-            # Use target_path as 'as', and lookup_local_field as 'localField'
-            
-            # If target_path is missing (legacy/fallback), use alias
-            as_field = jr.target_path if jr.target_path else jr.alias
-            local_field = jr.lookup_local_field if jr.lookup_local_field else jr.local_field
-            
-            pipeline.append({
-                "$lookup": {
-                    "from": jr.dst_collection,
-                    "localField": local_field,
-                    "foreignField": jr.foreign_field,
-                    "as": as_field,
-                }
-            })
-            pipeline.append({
-                "$unwind": {
-                    "path": f"${as_field}",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            })
-        
-        elif jr.kind == "embedded":
-            # Embedded Lookup
-            # Check if we already unwound this array
-            if jr.array_path not in unwound_arrays:
-                pipeline.append({
-                    "$unwind": {
-                        "path": f"${jr.array_path}",
-                        "preserveNullAndEmptyArrays": True,
+            pipeline += [
+                {
+                    "$lookup": {
+                        "from": r.dst_collection,
+                        "localField": r.lookup_local_field,
+                        "foreignField": r.foreign_field,
+                        "as": r.target_path
                     }
-                })
-                unwound_arrays.add(jr.array_path)
-                logger.debug("Added embedded unwind for alias '%s' via path '%s'", jr.alias, jr.array_path)
-            
-            # Now perform the lookup on the unwound document
-            pipeline.append({
-                "$lookup": {
-                    "from": jr.dst_collection,
-                    "localField": f"{jr.array_path}.{jr.local_field}",
-                    "foreignField": jr.foreign_field,
-                    "as": jr.alias,
-                }
-            })
-            pipeline.append({
-                "$unwind": {
-                    "path": f"${jr.alias}",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            })
+                },
+                {"$unwind": {"path": f"${r.target_path}", "preserveNullAndEmptyArrays": True}}
+            ]
+        else:
+            # multi-level unwind
+            if r.array_path not in unwound:
+                levels = r.array_path.split(".")
+                path_acc = ""
+                for lvl in levels:
+                    path_acc = f"{path_acc}.{lvl}" if path_acc else lvl
+                    if path_acc not in unwound:
+                        pipeline.append({"$unwind": {"path": f"${path_acc}", "preserveNullAndEmptyArrays": True}})
+                        unwound.add(path_acc)
+            pipeline += [
+                {
+                    "$lookup": {
+                        "from": r.dst_collection,
+                        "localField": f"{r.array_path}.{r.local_field}",
+                        "foreignField": r.foreign_field,
+                        "as": r.alias
+                    }
+                },
+                {"$unwind": {"path": f"${r.alias}", "preserveNullAndEmptyArrays": True}}
+            ]
 
-    # 3. Post-Lookup Filters
-    if post_lookup_filters:
-        logger.debug("Post-lookup filters identified: %s", post_lookup_filters)
-        # Pass recipes so we can rewrite items.product -> product
-        pipeline.append({"$match": compile_match(post_lookup_filters, join_recipes)})
-        logger.debug("Added post-lookup filters")
+    if post_filters:
+        pipeline.append({"$match": compile_match(post_filters, join_recipes)})
 
-    # 4. Aggregation Operations (count, group, etc.)
-    aggregation = intent.get("aggregation")
-    if aggregation:
-        if aggregation == "count":
-            # Simple count of matching documents
-            pipeline.append({"$count": "total"})
-            logger.debug("Added $count stage")
-        elif isinstance(aggregation, dict):
-            # Support for more complex aggregations
-            agg_type = aggregation.get("type")
-            if agg_type == "count":
-                count_field = aggregation.get("as", "total")
-                pipeline.append({"$count": count_field})
-                logger.debug("Added $count stage as '%s'", count_field)
-            elif agg_type == "group":
-                # Group by support
-                group_by = aggregation.get("by")
-                group_ops = aggregation.get("operations", {})
-                group_stage = {"_id": f"${group_by}" if group_by else None}
-                
-                for op_name, op_config in group_ops.items():
-                    if op_config.get("op") == "count":
-                        group_stage[op_name] = {"$sum": 1}
-                    elif op_config.get("op") == "sum":
-                        group_stage[op_name] = {"$sum": f"${op_config.get('field', '')}"}
-                    elif op_config.get("op") == "avg":
-                        group_stage[op_name] = {"$avg": f"${op_config.get('field', '')}"}
-                
-                pipeline.append({"$group": group_stage})
-                logger.debug("Added $group stage: %s", group_stage)
+    if intent.get("aggregation") == "count":
+        pipeline.append({"$count": "total"})
 
-    # 5. Final Projection (Optional but good practice, implicit in how aggregation works)
-    # We won't add an explicit $project unless 'select' requires complex reshaping,
-    # but for now we leave it as is to return full documents + joins.
-
-    logger.info("MongoDB pipeline compiled successfully with %d stages", len(pipeline))
-    logger.debug("Full Pipeline:\n%s", json.dumps(pipeline, indent=2))
     return pipeline
 
 # ------------------------------------------------------------------
-# 4) Execution
+# Execution
 # ------------------------------------------------------------------
 
-def run_pipeline(
-    mongo_uri: str,
-    mongo_db: str,
-    collection: str,
-    pipeline: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-
-    logger.info("Executing pipeline on MongoDB: %s", collection)
+def run_pipeline(uri: str, db: str, collection: str, pipeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     try:
-        with MongoClient(mongo_uri) as client:
-            docs = list(client[mongo_db][collection].aggregate(pipeline))
-            logger.debug("Pipeline execution returned %d documents", len(docs))
-            return docs
-    except Exception as e:
-        raise QueryCompilationError(f"MongoDB execution failed: {e}") from e
+        with MongoClient(uri) as client:
+            return list(client[db][collection].aggregate(pipeline))
+    except Exception as exc:
+        raise QueryCompilationError(f"MongoDB execution failed: {exc}") from exc
 
 # ------------------------------------------------------------------
 # CLI
@@ -496,37 +291,23 @@ def main() -> None:
 
     try:
         intent = load_intent(args.intent_file)
-        potential_paths = extract_potential_paths(intent)
+        paths = extract_potential_paths(intent)
 
-        driver = GraphDatabase.driver(
-            args.neo4j_uri,
-            auth=(args.neo4j_user, args.neo4j_password),
-        )
+        driver = GraphDatabase.driver(args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password))
 
-        try:
-            join_recipes = fetch_join_recipes(driver, intent["root"], potential_paths)
-            pipeline = compile_pipeline(intent, join_recipes)
+        with driver:
+            joins = fetch_join_recipes(driver, intent["root"], paths)
+            pipeline = compile_pipeline(intent, joins)
 
-            if args.print_pipeline:
-                print(json.dumps(pipeline, indent=2))
+        if args.print_pipeline:
+            print(json.dumps(pipeline, indent=2))
 
-            if args.execute:
-                results = run_pipeline(
-                    args.mongo_uri,
-                    args.mongo_db,
-                    intent["root"],
-                    pipeline,
-                )
-                print(json.dumps(results, indent=2, default=str))
+        if args.execute:
+            results = run_pipeline(args.mongo_uri, args.mongo_db, intent["root"], pipeline)
+            print(json.dumps(results, indent=2, default=str))
 
-        finally:
-            driver.close()
-
-    except QueryCompilationError as e:
-        logger.error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        logger.exception("Unexpected error occurred")
+    except QueryCompilationError as exc:
+        logger.error(exc)
         sys.exit(1)
 
 if __name__ == "__main__":

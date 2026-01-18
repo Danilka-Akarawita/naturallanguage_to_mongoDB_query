@@ -1,24 +1,18 @@
 {
-  "root": "orders",
-  "select": [],
+  "root": "deliveries",
+  "select": [
+    "_id",
+    "deliveryStatus",
+    "order.orderNo",
+    "order.customer.name"
+  ],
   "filters": [
     {
-      "pathHint": "outlet.city",
+      "pathHint": "order.customer.name",
       "op": "eq",
-      "value": "Colombo"
-    },
-    {
-      "pathHint": "customer.tags",
-      "op": "eq",
-      "value": "VIP"
-    },
-    {
-      "pathHint": "status",
-      "op": "neq",
-      "value": "CANCELLED"
+      "value": "Nimal"
     }
   ],
   "sort": [],
-  "limit": 100,
-  "aggregation": "count"
+  "limit": 10
 }
