@@ -1,18 +1,21 @@
 {
   "root": "deliveries",
   "select": [
-    "_id",
-    "deliveryStatus",
-    "order.orderNo",
-    "order.customer.name"
+    "orderNo"
   ],
   "filters": [
     {
-      "pathHint": "order.customer.name",
+      "pathHint": "driver.name",
       "op": "eq",
-      "value": "Nimal"
+      "value": "Ruwan"
+    },
+    {
+      "pathHint": "order.items.product.name",
+      "op": "contains",
+      "value": "Chocolate Gateau"
     }
   ],
   "sort": [],
-  "limit": 10
+  "limit": 100,
+  "aggregation": null
 }
