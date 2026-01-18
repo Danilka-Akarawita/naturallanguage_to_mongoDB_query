@@ -209,21 +209,36 @@ def compile_pipeline(intent: Dict[str, Any], join_recipes: List[JoinRecipe]) -> 
     pipeline: List[Dict[str, Any]] = []
     unwound: Set[str] = set()
 
-    # Split filters into pre/post
+    # Split filters into pre/post based on whether the field is a root field or joined
     lookup_paths = {r.target_path for r in join_recipes if r.kind == "collection"}
+
+    # Include embedded join paths (e.g. "ref.order" -> alias "order")
+    # This ensures filters like "ref.order.status" are treated as post-lookup filters.
+    for r in join_recipes:
+        if r.kind == "embedded" and r.dst_collection:
+            if r.array_path:
+                lookup_paths.add(f"{r.array_path}.{r.alias}")
+            lookup_paths.add(r.alias)
+
     pre_filters, post_filters = [], []
+
     for f in intent.get("filters", []):
         path = f["pathHint"]
-        if any(path.startswith(lp + ".") or path == lp for lp in lookup_paths):
+        # If path starts with any joined collection path, it goes to post_filters
+        if any(path == lp or path.startswith(lp + ".") for lp in lookup_paths):
             post_filters.append(f)
         else:
             pre_filters.append(f)
 
+    #  Add root-level filters first
     if pre_filters:
         pipeline.append({"$match": compile_match(pre_filters, join_recipes)})
 
-    # Sort joins: collection first
+    #  Sort joins: collection first
     join_recipes_sorted = sorted(join_recipes, key=lambda r: r.kind != "collection")
+
+    # Keep track of where post_filters should apply
+    post_filter_stage_idx = None
 
     for r in join_recipes_sorted:
         if r.kind == "collection":
@@ -241,7 +256,7 @@ def compile_pipeline(intent: Dict[str, Any], join_recipes: List[JoinRecipe]) -> 
                 })
                 unwound.add(r.target_path)
         else:
-            # embedded
+            # embedded joins
             if r.array_path and r.array_path not in unwound:
                 pipeline.append({
                     "$unwind": {"path": f"${r.array_path}", "preserveNullAndEmptyArrays": True}
@@ -260,14 +275,17 @@ def compile_pipeline(intent: Dict[str, Any], join_recipes: List[JoinRecipe]) -> 
                     "$unwind": {"path": f"${r.alias}", "preserveNullAndEmptyArrays": True}
                 })
 
+    # 3️⃣ Add filters on joined fields after all lookups/unwinds
     if post_filters:
         pipeline.append({"$match": compile_match(post_filters, join_recipes)})
 
+    # 4️⃣ Add aggregation if requested
     if intent.get("aggregation") == "count":
         pipeline.append({"$count": "total"})
 
     logger.info("Final pipeline compiled:\n%s", json.dumps(pipeline, indent=2))
     return pipeline
+
 
 # ------------------------------------------------------------------
 # Execute Mongo Pipeline
@@ -304,6 +322,7 @@ def main() -> None:
         with driver:
             joins = fetch_join_recipes(driver, intent["root"])
             pipeline = compile_pipeline(intent, joins)
+            print(json.dumps(pipeline, indent=2))
 
         if args.print_pipeline:
             print(json.dumps(pipeline, indent=2))
