@@ -76,17 +76,20 @@ def extract_potential_paths(intent: Dict[str, Any]) -> Set[str]:
 # Fetch Join Recipes from Neo4j
 # ------------------------------------------------------------------
 
-def fetch_join_recipes(driver: Driver, root_collection: str) -> List[JoinRecipe]:
+def fetch_join_recipes(driver: Driver, root_collection: str, required_paths: Set[str]) -> List[JoinRecipe]:
     recipes: List[JoinRecipe] = []
 
     with driver.session() as session:
         # 1️⃣ Collection joins
-        collection_records = session.run("""
+        # 1️⃣ Collection joins
+        collection_result = session.run("""
             MATCH p=(root:Collection {name:$root})-[:REFERS_TO*0..]->(c:Collection)
             UNWIND relationships(p) AS r
             RETURN startNode(r).name AS src, endNode(r).name AS dst,
                    r.alias AS alias, r.localField AS localField, r.foreignField AS foreignField
         """, root=root_collection)
+        collection_records = collection_result.data()
+        logger.info("Collection join recipes fetched: %s", collection_records)
 
         for rec in collection_records:
             jr = JoinRecipe(
@@ -101,33 +104,43 @@ def fetch_join_recipes(driver: Driver, root_collection: str) -> List[JoinRecipe]
 
         # Compute fully qualified target paths
         def resolve_paths(jr: JoinRecipe):
+            logger.info("Resolving paths for %s", jr)
             if jr.target_path:
                 return  # already set
             if jr.src_collection == root_collection:
                 jr.target_path = jr.alias
                 jr.lookup_local_field = jr.local_field
+                logger.info("Root collection found: %s", jr)
+
             else:
                 parent = next((r for r in recipes if r.dst_collection == jr.src_collection), None)
+                logger.info("Parent found: %s", parent)
                 if parent:
                     resolve_paths(parent)
+                    print("hii",parent.target_path,jr.alias)
                     jr.target_path = f"{parent.target_path}.{jr.alias}"
                     jr.lookup_local_field = f"{parent.target_path}.{jr.local_field}"
+
                 else:
+                    logger.info("No parent found for %s", jr)
                     jr.target_path = jr.alias
                     jr.lookup_local_field = jr.local_field
 
         for jr in recipes:
             resolve_paths(jr)
 
-        # 2️⃣ Embedded joins
+        # Embedded joins
         collections_to_check = [root_collection] + [r.dst_collection for r in recipes if r.kind == "collection"]
+        logger.info("Collections to check: %s", collections_to_check)
         for col in collections_to_check:
-            embedded_records = session.run("""
+            embedded_result = session.run("""
                 MATCH (c:Collection {name:$col})-[:EMBEDS]->(e:Embedded)-[r:REFERS_TO]->(dst:Collection)
                 RETURN e.path AS array_path, r.alias AS alias,
                        dst.name AS dst_collection,
                        r.localField AS local_field, r.foreignField AS foreign_field
             """, col=col)
+            embedded_records = embedded_result.data()
+            logger.info("Embedded join recipes fetched: %s", embedded_records)
 
             for rec in embedded_records:
                 parent = next((r for r in recipes if r.dst_collection == col and r.kind == "collection"), None)
@@ -161,18 +174,34 @@ def fetch_join_recipes(driver: Driver, root_collection: str) -> List[JoinRecipe]
                 foreign_field=None,
                 array_path=rec["array_path"]
             )
+            print("embed jr",jr)
             recipes.append(jr)
 
     # Deduplicate joins
     seen = set()
     final_recipes = []
     for r in recipes:
+        # Determine the effective path for this recipe
+        # For collection joins, use target_path (which should be set by resolve_paths)
+        # For embedded joins, use array_path or alias
+        path_to_check = r.target_path if r.kind == "collection" else (r.array_path or r.alias)
+        
+        # Filter based on required_paths
+        # We check if the path_to_check is in required_paths 
+        # OR if it's a prefix of any required path (though extract_potential_paths handles prefixes, 
+        # it's safer to be exact if we trust extract_potential_paths fully).
+        # Since extract_potential_paths adds all prefixes (e.g. "a.b" adds "a" and "a.b"),
+        # we can just check for direct membership.
+        if path_to_check and path_to_check not in required_paths:
+             logger.debug("Skipping join for '%s' as it is not in required paths", path_to_check)
+             continue
+
         key = (r.target_path or r.alias, r.array_path)
         if key not in seen:
             seen.add(key)
             final_recipes.append(r)
 
-    logger.info("Total join recipes fetched: %d", len(final_recipes))
+    logger.info("Total join recipes fetched (after filtering): %d", len(final_recipes))
     return final_recipes
 
 # ------------------------------------------------------------------
@@ -320,7 +349,7 @@ def main() -> None:
 
         driver = GraphDatabase.driver(args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password))
         with driver:
-            joins = fetch_join_recipes(driver, intent["root"])
+            joins = fetch_join_recipes(driver, intent["root"], paths)
             pipeline = compile_pipeline(intent, joins)
             print(json.dumps(pipeline, indent=2))
 
