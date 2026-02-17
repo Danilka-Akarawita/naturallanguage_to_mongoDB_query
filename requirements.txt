@@ -2,6 +2,7 @@ pymongo
 pydantic
 dnspython
 python-dotenv
-pymongo
 neo4j
-
+openai
+pydantic-settings
+pytest
