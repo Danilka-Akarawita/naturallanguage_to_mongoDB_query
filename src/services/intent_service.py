@@ -10,9 +10,6 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# -----------------------------
-# Schema Context & Prompts
-# -----------------------------
 
 DEFAULT_SCHEMA_TEXT = """
 MongoDB schema (prototype)

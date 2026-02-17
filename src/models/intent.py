@@ -1,9 +1,5 @@
 from typing import Literal, List, Union, Optional
 from pydantic import BaseModel, Field, ConfigDict
-
-# -----------------------------
-# Enums
-# -----------------------------
 Op = Literal[
     "eq", "ne", "gt", "gte", "lt", "lte",
     "between", "in",
@@ -15,9 +11,7 @@ SortDir = Literal["asc", "desc"]
 AggregationType = Literal["count", "group"]
 
 
-# -----------------------------
-# Models
-# -----------------------------
+
 class Filter(BaseModel):
     """Filter condition for the query."""
     model_config = ConfigDict(extra="forbid")

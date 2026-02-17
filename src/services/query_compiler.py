@@ -11,10 +11,6 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# ------------------------------------------------------------------
-# Data Models
-# ------------------------------------------------------------------
-
 @dataclass
 class JoinRecipe:
     """Represents a join operation derived from Neo4j metadata."""
@@ -32,9 +28,6 @@ class JoinRecipe:
 class QueryCompilationError(Exception):
     """Raised when query compilation fails."""
 
-# ------------------------------------------------------------------
-# Service Class
-# ------------------------------------------------------------------
 
 class QueryCompiler:
     """
