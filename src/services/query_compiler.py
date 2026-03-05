@@ -11,10 +11,12 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+
 @dataclass
 class JoinRecipe:
     """Represents a join operation derived from Neo4j metadata."""
-    kind: str                    # "collection" | "embedded"
+
+    kind: str  # "collection" | "embedded"
     src_collection: str
     alias: str
     dst_collection: Optional[str]
@@ -31,11 +33,15 @@ class QueryCompilationError(Exception):
 
 class QueryCompiler:
     """
-    Compiles an Intent (dict) into a MongoDB Aggregation Pipeline 
+    Compiles an Intent (dict) into a MongoDB Aggregation Pipeline
     using schema relationships from Neo4j.
     """
 
-    def __init__(self, neo4j_uri: str = settings.NEO4J_URI, neo4j_auth: tuple = (settings.NEO4J_USER, settings.NEO4J_PASSWORD)):
+    def __init__(
+        self,
+        neo4j_uri: str = settings.NEO4J_URI,
+        neo4j_auth: tuple = (settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+    ):
         self.driver = GraphDatabase.driver(neo4j_uri, auth=neo4j_auth)
 
     def close(self):
@@ -54,10 +60,10 @@ class QueryCompiler:
             for item in intent.get(section, []):
                 # Handle both object (dict) and string representations if checking legacy or dict inputs
                 if isinstance(item, dict):
-                     path = item.get("pathHint") or item.get("field")
+                    path = item.get("pathHint") or item.get("field")
                 else:
-                     path = item # Assuming string if not dict
-                
+                    path = item  # Assuming string if not dict
+
                 if not path:
                     continue
                 parts = path.split(".")
@@ -66,18 +72,23 @@ class QueryCompiler:
         logger.info(f"Potential paths extracted: {used}")
         return used
 
-    def fetch_join_recipes(self, root_collection: str, required_paths: Set[str]) -> List[JoinRecipe]:
+    def fetch_join_recipes(
+        self, root_collection: str, required_paths: Set[str]
+    ) -> List[JoinRecipe]:
         """Queries Neo4j to find necessary joins for the required paths."""
         recipes: List[JoinRecipe] = []
 
         with self.driver.session() as session:
             # 1. Collection joins
-            collection_result = session.run("""
+            collection_result = session.run(
+                """
                 MATCH p=(root:Collection {name:$root})-[:REFERS_TO*0..]->(c:Collection)
                 UNWIND relationships(p) AS r
                 RETURN startNode(r).name AS src, endNode(r).name AS dst,
                        r.alias AS alias, r.localField AS localField, r.foreignField AS foreignField
-            """, root=root_collection)
+            """,
+                root=root_collection,
+            )
             collection_records = collection_result.data()
             logger.debug(f"Collection join recipes fetched: {collection_records}")
 
@@ -88,7 +99,7 @@ class QueryCompiler:
                     dst_collection=rec["dst"],
                     alias=rec["alias"],
                     local_field=rec["localField"],
-                    foreign_field=rec["foreignField"]
+                    foreign_field=rec["foreignField"],
                 )
                 recipes.append(jr)
 
@@ -100,7 +111,10 @@ class QueryCompiler:
                     jr.target_path = jr.alias
                     jr.lookup_local_field = jr.local_field
                 else:
-                    parent = next((r for r in recipes if r.dst_collection == jr.src_collection), None)
+                    parent = next(
+                        (r for r in recipes if r.dst_collection == jr.src_collection),
+                        None,
+                    )
                     if parent:
                         resolve_paths(parent)
                         jr.target_path = f"{parent.target_path}.{jr.alias}"
@@ -113,20 +127,36 @@ class QueryCompiler:
                 resolve_paths(jr)
 
             # 2. Embedded joins
-            collections_to_check = [root_collection] + [r.dst_collection for r in recipes if r.kind == "collection"]
-            
+            collections_to_check = [root_collection] + [
+                r.dst_collection for r in recipes if r.kind == "collection"
+            ]
+
             for col in collections_to_check:
-                embedded_result = session.run("""
+                embedded_result = session.run(
+                    """
                     MATCH (c:Collection {name:$col})-[:EMBEDS]->(e:Embedded)-[r:REFERS_TO]->(dst:Collection)
                     RETURN e.path AS array_path, r.alias AS alias,
                            dst.name AS dst_collection,
                            r.localField AS local_field, r.foreignField AS foreign_field
-                """, col=col)
+                """,
+                    col=col,
+                )
                 embedded_records = embedded_result.data()
 
                 for rec in embedded_records:
-                    parent = next((r for r in recipes if r.dst_collection == col and r.kind == "collection"), None)
-                    full_array_path = f"{parent.target_path}.{rec['array_path']}" if parent else rec['array_path']
+                    parent = next(
+                        (
+                            r
+                            for r in recipes
+                            if r.dst_collection == col and r.kind == "collection"
+                        ),
+                        None,
+                    )
+                    full_array_path = (
+                        f"{parent.target_path}.{rec['array_path']}"
+                        if parent
+                        else rec["array_path"]
+                    )
 
                     jr = JoinRecipe(
                         kind="embedded",
@@ -135,16 +165,19 @@ class QueryCompiler:
                         dst_collection=rec["dst_collection"],
                         local_field=rec["local_field"],
                         foreign_field=rec["foreign_field"],
-                        array_path=full_array_path
+                        array_path=full_array_path,
                     )
                     recipes.append(jr)
 
             # 3. Root-level embedded arrays without REFERS_TO
-            embedded_root = session.run("""
+            embedded_root = session.run(
+                """
                 MATCH (c:Collection {name:$root})-[:EMBEDS]->(e:Embedded)
                 WHERE NOT (e)-[:REFERS_TO]->(:Collection)
                 RETURN e.path AS array_path
-            """, root=root_collection)
+            """,
+                root=root_collection,
+            )
 
             for rec in embedded_root:
                 jr = JoinRecipe(
@@ -154,7 +187,7 @@ class QueryCompiler:
                     dst_collection=None,
                     local_field=None,
                     foreign_field=None,
-                    array_path=rec["array_path"]
+                    array_path=rec["array_path"],
                 )
                 recipes.append(jr)
 
@@ -162,23 +195,33 @@ class QueryCompiler:
         seen = set()
         final_recipes = []
         for r in recipes:
-            path_to_check = r.target_path if r.kind == "collection" else (r.array_path or r.alias)
-            
+            path_to_check = (
+                r.target_path if r.kind == "collection" else (r.array_path or r.alias)
+            )
+
             if path_to_check and path_to_check not in required_paths:
-                 continue
+                continue
 
             key = (r.target_path or r.alias, r.array_path)
             if key not in seen:
                 seen.add(key)
                 final_recipes.append(r)
 
-        logger.info(f"Total join recipes fetched (after filtering): {len(final_recipes)}")
+        logger.info(
+            f"Total join recipes fetched (after filtering): {len(final_recipes)}"
+        )
         return final_recipes
 
-    def compile_match(self, filters: List[Dict[str, Any]], join_recipes: List[JoinRecipe]) -> Dict[str, Any]:
+    def compile_match(
+        self, filters: List[Dict[str, Any]], join_recipes: List[JoinRecipe]
+    ) -> Dict[str, Any]:
         """Compiles the $match stage of the pipeline."""
         match: Dict[str, Any] = {}
-        rewrite_map = {f"{r.array_path}.{r.alias}": r.alias for r in join_recipes if r.kind == "embedded" and r.array_path}
+        rewrite_map = {
+            f"{r.array_path}.{r.alias}": r.alias
+            for r in join_recipes
+            if r.kind == "embedded" and r.array_path
+        }
 
         for f in filters:
             path = f["pathHint"]
@@ -189,13 +232,29 @@ class QueryCompiler:
             op = f.get("op", "eq")
             val = f["value"]
             match[path] = (
-                val if op == "eq" else
-                {"$ne": val} if op == "neq" else
-                {"$gt": val} if op == "gt" else
-                {"$gte": val} if op == "gte" else
-                {"$lt": val} if op == "lt" else
-                {"$lte": val} if op == "lte" else
-                {"$in": val} if op == "in" else val
+                val
+                if op == "eq"
+                else (
+                    {"$ne": val}
+                    if op == "neq"
+                    else (
+                        {"$gt": val}
+                        if op == "gt"
+                        else (
+                            {"$gte": val}
+                            if op == "gte"
+                            else (
+                                {"$lt": val}
+                                if op == "lt"
+                                else (
+                                    {"$lte": val}
+                                    if op == "lte"
+                                    else {"$in": val} if op == "in" else val
+                                )
+                            )
+                        )
+                    )
+                )
             )
         return match
 
@@ -203,7 +262,7 @@ class QueryCompiler:
         """Main method to compile the pipeline."""
         required_paths = self.extract_potential_paths(intent)
         join_recipes = self.fetch_join_recipes(intent["root"], required_paths)
-        
+
         pipeline: List[Dict[str, Any]] = []
         unwound: Set[str] = set()
 
@@ -233,37 +292,60 @@ class QueryCompiler:
         for r in join_recipes_sorted:
             if r.kind == "collection":
                 if r.target_path not in unwound:
-                    pipeline.append({
-                        "$lookup": {
-                            "from": r.dst_collection,
-                            "localField": r.lookup_local_field,
-                            "foreignField": r.foreign_field,
-                            "as": r.target_path
+                    pipeline.append(
+                        {
+                            "$lookup": {
+                                "from": r.dst_collection,
+                                "localField": r.lookup_local_field,
+                                "foreignField": r.foreign_field,
+                                "as": r.target_path,
+                            }
                         }
-                    })
-                    pipeline.append({
-                        "$unwind": {"path": f"${r.target_path}", "preserveNullAndEmptyArrays": True}
-                    })
+                    )
+                    pipeline.append(
+                        {
+                            "$unwind": {
+                                "path": f"${r.target_path}",
+                                "preserveNullAndEmptyArrays": True,
+                            }
+                        }
+                    )
                     unwound.add(r.target_path)
             else:
                 # embedded joins
                 if r.array_path and r.array_path not in unwound:
-                    pipeline.append({
-                        "$unwind": {"path": f"${r.array_path}", "preserveNullAndEmptyArrays": True}
-                    })
+                    pipeline.append(
+                        {
+                            "$unwind": {
+                                "path": f"${r.array_path}",
+                                "preserveNullAndEmptyArrays": True,
+                            }
+                        }
+                    )
                     unwound.add(r.array_path)
                 if r.dst_collection:
-                    pipeline.append({
-                        "$lookup": {
-                            "from": r.dst_collection,
-                            "localField": f"{r.array_path}.{r.local_field}" if r.array_path else r.local_field,
-                            "foreignField": r.foreign_field,
-                            "as": r.alias
+                    pipeline.append(
+                        {
+                            "$lookup": {
+                                "from": r.dst_collection,
+                                "localField": (
+                                    f"{r.array_path}.{r.local_field}"
+                                    if r.array_path
+                                    else r.local_field
+                                ),
+                                "foreignField": r.foreign_field,
+                                "as": r.alias,
+                            }
                         }
-                    })
-                    pipeline.append({
-                        "$unwind": {"path": f"${r.alias}", "preserveNullAndEmptyArrays": True}
-                    })
+                    )
+                    pipeline.append(
+                        {
+                            "$unwind": {
+                                "path": f"${r.alias}",
+                                "preserveNullAndEmptyArrays": True,
+                            }
+                        }
+                    )
 
         # 3. Post-lookup filters
         if post_filters:
@@ -277,11 +359,12 @@ class QueryCompiler:
         return pipeline
 
 
-# ------------------------------------------------------------------
-# Execution Helper
-# ------------------------------------------------------------------
-
-def execute_pipeline(pipeline: List[Dict[str, Any]], collection: str, db_name: str = settings.MONGO_DB, uri: str = settings.MONGO_URI) -> List[Dict[str, Any]]:
+def execute_pipeline(
+    pipeline: List[Dict[str, Any]],
+    collection: str,
+    db_name: str = settings.MONGO_DB,
+    uri: str = settings.MONGO_URI,
+) -> List[Dict[str, Any]]:
     """Executes a pipeline against MongoDB."""
     try:
         with MongoClient(uri, tlsAllowInvalidCertificates=True) as client:
@@ -293,7 +376,7 @@ def execute_pipeline(pipeline: List[Dict[str, Any]], collection: str, db_name: s
 if __name__ == "__main__":
     import argparse
     import sys
-    
+
     # Simple CLI
     ap = argparse.ArgumentParser()
     ap.add_argument("--intent", required=True, help="Path to intent JSON file")

@@ -5,9 +5,6 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# ----------------------------
-# Schema Metadata
-# ----------------------------
 
 COLLECTIONS = [
     "users",
@@ -26,7 +23,7 @@ EMBEDDED = [
 ]
 
 REFERS_TO_COLLECTION = [
-    #src,dst,alias, localField, foreignField
+    # src,dst,alias, localField, foreignField
     ("orders", "customers", "customer", "customerId", "_id"),
     ("orders", "outlets", "outlet", "outletId", "_id"),
     ("orders", "users", "createdBy", "createdByUserId", "_id"),
@@ -44,9 +41,6 @@ REFERS_TO_EMBEDDED = [
     ("inventory_moves", "ref", "deliveries", "delivery", "deliveryId", "_id"),
 ]
 
-# ----------------------------
-# Cypher helpers
-# ----------------------------
 
 RESET_CYPHER = "MATCH (n) DETACH DELETE n;"
 
@@ -55,9 +49,6 @@ CONSTRAINTS_CYPHER = [
     "CREATE CONSTRAINT embedded_key IF NOT EXISTS FOR (e:Embedded) REQUIRE (e.owner, e.path) IS UNIQUE",
 ]
 
-# ----------------------------
-# Metadata loader
-# ----------------------------
 
 def load_metadata(tx):
     logger.info(">>  Creating Collection nodes...")
@@ -84,9 +75,10 @@ def load_metadata(tx):
             localField=localField,
             foreignField=foreignField,
         )
-        logger.debug(f"    Created Embedded {owner}.{path} with REFERS_TO -> {dst} as {alias}")
+        logger.debug(
+            f"    Created Embedded {owner}.{path} with REFERS_TO -> {dst} as {alias}"
+        )
 
-    # Also create any remaining Embedded nodes without REFERS_TO
     for owner, path in EMBEDDED:
         if not any(owner == e[0] and path == e[1] for e in REFERS_TO_EMBEDDED):
             tx.run(

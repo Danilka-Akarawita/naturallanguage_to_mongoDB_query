@@ -5,17 +5,23 @@ from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 
 from src.models.schemas import (
-    User, Customer, Outlet, Product, Order, OrderItem, OrderCustomization,
-    Payment, Delivery, InventoryMove, InventoryRef
+    User,
+    Customer,
+    Outlet,
+    Product,
+    Order,
+    OrderItem,
+    OrderCustomization,
+    Payment,
+    Delivery,
+    InventoryMove,
+    InventoryRef,
 )
 from src.config import settings
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# ----------------------------
-# Helpers
-# ----------------------------
 
 def utc_dt(s: str) -> datetime:
     """Parse ISO-like 'YYYY-MM-DDTHH:MM:SSZ' into a timezone-aware datetime."""
@@ -23,9 +29,6 @@ def utc_dt(s: str) -> datetime:
         s = s[:-1] + "+00:00"
     return datetime.fromisoformat(s).astimezone(timezone.utc)
 
-# ----------------------------
-# Seed data
-# ----------------------------
 
 ORG = "ORG-01"
 
@@ -46,9 +49,33 @@ SEED_CUSTOMERS: List[Customer] = [
 ]
 
 SEED_PRODUCTS: List[Product] = [
-    Product(_id="P1", sku="CK-CHO-01", name="Chocolate Gateau", category="CAKE", price=4500, active=True, orgId=ORG),
-    Product(_id="P2", sku="PK-RIB-01", name="Ribbon Pack", category="PACKAGING", price=300, active=True, orgId=ORG),
-    Product(_id="P3", sku="TP-CHO-01", name="Choco Shavings", category="TOPPING", price=250, active=True, orgId=ORG),
+    Product(
+        _id="P1",
+        sku="CK-CHO-01",
+        name="Chocolate Gateau",
+        category="CAKE",
+        price=4500,
+        active=True,
+        orgId=ORG,
+    ),
+    Product(
+        _id="P2",
+        sku="PK-RIB-01",
+        name="Ribbon Pack",
+        category="PACKAGING",
+        price=300,
+        active=True,
+        orgId=ORG,
+    ),
+    Product(
+        _id="P3",
+        sku="TP-CHO-01",
+        name="Choco Shavings",
+        category="TOPPING",
+        price=250,
+        active=True,
+        orgId=ORG,
+    ),
 ]
 
 SEED_ORDERS: List[Order] = [
@@ -65,7 +92,9 @@ SEED_ORDERS: List[Order] = [
             OrderItem(productId="P1", qty=1, unitPrice=4500),
             OrderItem(productId="P2", qty=2, unitPrice=300),
         ],
-        customization=OrderCustomization(messageOnCake="Happy Birthday!", theme="Spiderman"),
+        customization=OrderCustomization(
+            messageOnCake="Happy Birthday!", theme="Spiderman"
+        ),
         orgId=ORG,
     ),
     Order(
@@ -191,10 +220,6 @@ SEED_INVENTORY_MOVES: List[InventoryMove] = [
 ]
 
 
-# ----------------------------
-# Seeding functions
-# ----------------------------
-
 def _insert_many_safe(coll, docs: List[Dict[str, Any]]) -> None:
     """Insert docs; ignore duplicates for repeated runs."""
     if not docs:
@@ -203,7 +228,9 @@ def _insert_many_safe(coll, docs: List[Dict[str, Any]]) -> None:
         coll.insert_many(docs, ordered=False)
         logger.info(f"Inserted {len(docs)} documents into {coll.name}")
     except DuplicateKeyError:
-        logger.warning(f"Some documents in {coll.name} already exist (DuplicateKeyError).")
+        logger.warning(
+            f"Some documents in {coll.name} already exist (DuplicateKeyError)."
+        )
     except Exception as e:
         logger.error(f"Error inserting into {coll.name}: {e}")
 
@@ -216,7 +243,9 @@ def ensure_indexes(db):
     db.outlets.create_index([("orgId", ASCENDING), ("_id", ASCENDING)], unique=True)
     db.products.create_index([("orgId", ASCENDING), ("_id", ASCENDING)], unique=True)
 
-    db.orders.create_index([("orgId", ASCENDING), ("status", ASCENDING), ("createdAt", ASCENDING)])
+    db.orders.create_index(
+        [("orgId", ASCENDING), ("status", ASCENDING), ("createdAt", ASCENDING)]
+    )
     db.orders.create_index([("orgId", ASCENDING), ("customerId", ASCENDING)])
     db.orders.create_index([("orgId", ASCENDING), ("outletId", ASCENDING)])
     db.orders.create_index([("orgId", ASCENDING), ("createdByUserId", ASCENDING)])
@@ -224,8 +253,12 @@ def ensure_indexes(db):
 
     db.payments.create_index([("orgId", ASCENDING), ("orderId", ASCENDING)])
     db.deliveries.create_index([("orgId", ASCENDING), ("orderId", ASCENDING)])
-    db.inventory_moves.create_index([("orgId", ASCENDING), ("productId", ASCENDING), ("createdAt", ASCENDING)])
-    db.inventory_moves.create_index([("orgId", ASCENDING), ("outletId", ASCENDING), ("createdAt", ASCENDING)])
+    db.inventory_moves.create_index(
+        [("orgId", ASCENDING), ("productId", ASCENDING), ("createdAt", ASCENDING)]
+    )
+    db.inventory_moves.create_index(
+        [("orgId", ASCENDING), ("outletId", ASCENDING), ("createdAt", ASCENDING)]
+    )
     logger.info("Indexes confirmed.")
 
 
@@ -262,10 +295,11 @@ def seed_to_mongo(uri: str, db_name: str, drop: bool = False) -> None:
 
         logger.info(f"✅ Seeded database '{db_name}' at {uri}")
         logger.info(f"Collections: {db.list_collection_names()}")
-    
+
     except Exception as e:
         logger.critical(f"Failed to seed MongoDB: {e}")
         raise
+
 
 def main():
     ap = argparse.ArgumentParser()
