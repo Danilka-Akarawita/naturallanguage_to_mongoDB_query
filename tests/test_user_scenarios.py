@@ -52,7 +52,6 @@ ADVANCED_SCENARIOS = [
         ]
     ),
     (
-        # Updated expectation: "December 2025" implies a date range (between), not just >=
         "Give me an inventory usage report for Colombo 07 Outlet in December 2025: total OUT qty per product, and also show WASTAGE per product.",
         "inventory_moves",
         [
@@ -100,14 +99,11 @@ def test_user_scenario_generation(query, expected_root, expected_checks):
             
             # Check Op Match (if specified)
             if op:
-                # If checking for 'between', the model might return 'between' OR 'gte'/'lte' pair. 
-                # Simplest is checking if the op string matches.
+                
                 if op not in str(f.op):
                     continue
-
-            # Check Value Match (if specified)
             if value_part is not None:
-                # Handle boolean vs string looseness if needed, or exact match
+                
                 if str(value_part).lower() in str(f.value).lower():
                     found = True
                     break

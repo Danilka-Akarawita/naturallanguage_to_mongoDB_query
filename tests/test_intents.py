@@ -6,10 +6,7 @@ logger = setup_logger(__name__)
 
 def get_test_cases():
     """Helper to generate test cases for parameterization."""
-    # This is a bit tricky with pytest parameterization since we need to read the file
-    # before parameterization happens. For simplicity, we'll use a fixture in the test
-    # and iterate inside, or let pytest collect it if we modify conftest.
-    # Ideally, we iterate over the keys.
+    
     import json
     with open("tested_intents.json", "r") as f:
         data = json.load(f)
@@ -37,14 +34,10 @@ def test_intent_execution(query_compiler, scenario_id, scenario_data):
         logger.info(f"Scenario {scenario_id} returned {len(results)} results.")
         
         # 3. Assertions
-        # We expect at least some results for these "tested" intents, 
-        # assuming the seed data matches the intent's expectations.
-        # If an intent is designed to return nothing, this assertion might need adjustment,
-        # but usually "tested intents" imply working queries.
+       
         assert isinstance(results, list), "Results should be a list"
         
-        # Optional: Assert specific counts if known, otherwise just check for no errors
-        # useful for basic validity check.
+        
         
     except Exception as e:
         pytest.fail(f"Execution failed for {scenario_id}: {e}")
