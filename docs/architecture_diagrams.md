@@ -1,34 +1,34 @@
-# 🏗️ Architecture Documentation: Natural Language to MongoDB Query System
+#  Architecture Documentation: Natural Language to MongoDB Query System
 
 > **Purpose**: This document provides deep function-level architecture diagrams to help understand the system's design and data flow for future reference.
 
 ---
 
-## 📊 System Overview
+##  System Overview
 
 ```mermaid
 flowchart TB
-    subgraph Input["📥 Input Layer"]
+    subgraph Input[" Input Layer"]
         NL["Natural Language Query"]
         Schema["src/models/schemas.py"]
     end
     
-    subgraph Services["⚙️ Services Layer (src/services)"]
+    subgraph Services[" Services Layer (src/services)"]
         IS["intent_service.py"]
         MQC["query_compiler.py"]
     end
 
-    subgraph Scripts["🛠️ Scripts"]
+    subgraph Scripts[" Scripts"]
         NM["scripts/load_neo4j.py"]
         SM["scripts/seed_mongo.py"]
     end
     
-    subgraph Storage["🗄️ Data Stores"]
+    subgraph Storage[" Data Stores"]
         Neo4j["Neo4j Graph DB"]
         MongoDB["MongoDB"]
     end
     
-    subgraph Output["📤 Output"]
+    subgraph Output[" Output"]
         Intent["Intent Object"]
         Pipeline["Aggregation Pipeline"]
         Results["Query Results"]
